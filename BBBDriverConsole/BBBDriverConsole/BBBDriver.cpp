@@ -1,18 +1,17 @@
 #include "pch.h"
 #include "BBBDriver.h"
+
 #include <vector>
 #include <algorithm>
 #include <cmath>
-
-#pragma once
+#include <limits>
+#include <fstream>
+#include <iostream>
+#include <cstdint>
 
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-
-#include "Spinnaker.h"
-#include "SpinGenApi/SpinnakerGenApi.h"
-#include <string>
 
 #ifdef min
 #undef min
@@ -20,7 +19,6 @@
 #ifdef max
 #undef max
 #endif
-
 
 using namespace Spinnaker;
 using namespace Spinnaker::GenApi;
@@ -31,7 +29,7 @@ static float Percentile(std::vector<float>& v, float q)
     std::sort(v.begin(), v.end());
     float idx = q * (v.size() - 1);
     size_t i0 = (size_t)idx;
-    size_t i1 = std::min(i0 + 1, v.size() - 1);
+    size_t i1 = (std::min)(i0 + 1, v.size() - 1);
     float t = idx - (float)i0;
     return v[i0] * (1.f - t) + v[i1] * t;
 }
@@ -48,7 +46,7 @@ BBBDriver::~BBBDriver()
         system->ReleaseInstance();
 }
 
-Spinnaker::CameraPtr BBBDriver::GetCamera() const
+CameraPtr BBBDriver::GetCamera() const
 {
     return cam;
 }
@@ -90,14 +88,17 @@ bool BBBDriver::OpenFirstStereo()
     {
         CameraPtr c = cams.GetByIndex(i);
         c->Init();
+
         bool ok = ImageUtilityStereo::IsStereoCamera(c);
         if (ok)
         {
             cam = c;
             return true;
         }
+
         c->DeInit();
     }
+
     return false;
 }
 
@@ -110,14 +111,17 @@ bool BBBDriver::OpenBySerial(const std::string& serial)
     {
         CameraPtr c = cams.GetByIndex(i);
         c->Init();
+
         std::string s = c->TLDevice.DeviceSerialNumber.ToString().c_str();
         if (s == serial && ImageUtilityStereo::IsStereoCamera(c))
         {
             cam = c;
             return true;
         }
+
         c->DeInit();
     }
+
     return false;
 }
 
@@ -127,8 +131,7 @@ void BBBDriver::Close()
     {
         if (cam)
         {
-            try { cam->EndAcquisition(); }
-            catch (...) {}
+            StopAcquisition();
             cam->DeInit();
             cam = nullptr;
         }
@@ -166,10 +169,41 @@ bool BBBDriver::ConfigureStreams_Rectified1_Disparity()
     return true;
 }
 
+bool BBBDriver::StartAcquisition()
+{
+    if (!cam) return false;
+    if (acquiring) return true;
+
+    try
+    {
+        cam->BeginAcquisition();
+        acquiring = true;
+        return true;
+    }
+    catch (Spinnaker::Exception& e)
+    {
+        std::cout << "BeginAcquisition fallo: " << e.what() << "\n";
+        acquiring = false;
+        return false;
+    }
+}
+
+void BBBDriver::StopAcquisition()
+{
+    if (!cam || !acquiring) return;
+    try { cam->EndAcquisition(); }
+    catch (...) {}
+    acquiring = false;
+}
+
+
 bool BBBDriver::ConfigureSoftwareTrigger()
 {
     if (!cam) return false;
     INodeMap& nodeMap = cam->GetNodeMap();
+
+    // Algunas cámaras requieren AcquisitionMode=Continuous
+    SetEnumAsString(nodeMap, "AcquisitionMode", "Continuous");
 
     if (!SetEnumAsString(nodeMap, "TriggerMode", "Off")) return false;
     if (!SetEnumAsString(nodeMap, "TriggerSelector", "FrameStart")) return false;
@@ -200,47 +234,130 @@ bool BBBDriver::CaptureOnceSync(ImageList& outSet, uint64_t timeoutMs)
 {
     if (!cam) return false;
 
+    if (!StartAcquisition())
+        return false;
+
     try
     {
-        cam->BeginAcquisition();
-
-        // Disparo software (como ahora NO tienes cable)
-        try
-        {
-            INodeMap& nodeMap = cam->GetNodeMap();
-            CCommandPtr sw = nodeMap.GetNode("TriggerSoftware");
-            if (IsWritable(sw))
-                sw->Execute();
-        }
-        catch (...) {}
+        // Disparo software
+        INodeMap& nodeMap = cam->GetNodeMap();
+        CCommandPtr sw = nodeMap.GetNode("TriggerSoftware");
+        if (IsWritable(sw))
+            sw->Execute();
 
         outSet = cam->GetNextImageSync(timeoutMs);
-
-        cam->EndAcquisition();
         return true;
     }
-    catch (...)
+    catch (Spinnaker::Exception& e)
     {
-        try { cam->EndAcquisition(); }
-        catch (...) {}
+        std::cout << "GetNextImageSync fallo: " << e.what() << "\n";
         return false;
     }
+}
+
+
+// Guardado manual para disparity (evita el crash de disp->Save)
+static bool SavePGM8(const ImagePtr& img, const std::string& filePath)
+{
+    const int w = (int)img->GetWidth();
+    const int h = (int)img->GetHeight();
+    const uint8_t* data = (const uint8_t*)img->GetData();
+    if (!data) return false;
+
+    const int stride = (int)img->GetStride();
+
+    std::ofstream f(filePath, std::ios::binary);
+    if (!f.is_open()) return false;
+
+    f << "P5\n" << w << " " << h << "\n255\n";
+    for (int y = 0; y < h; ++y)
+        f.write((const char*)(data + y * stride), w);
+
+    return true;
+}
+
+static bool SavePGM16_BE(const ImagePtr& img, const std::string& filePath)
+{
+    const int w = (int)img->GetWidth();
+    const int h = (int)img->GetHeight();
+    const uint16_t* data = (const uint16_t*)img->GetData();
+    if (!data) return false;
+
+    const int strideU16 = (int)(img->GetStride() / sizeof(uint16_t));
+
+    std::ofstream f(filePath, std::ios::binary);
+    if (!f.is_open()) return false;
+
+    f << "P5\n" << w << " " << h << "\n65535\n";
+
+    for (int y = 0; y < h; ++y)
+    {
+        const uint16_t* row = data + y * strideU16;
+        for (int x = 0; x < w; ++x)
+        {
+            uint16_t v = row[x];
+            unsigned char be[2] = {
+                (unsigned char)(v >> 8),
+                (unsigned char)(v & 0xFF)
+            };
+            f.write((char*)be, 2);
+        }
+    }
+
+    return true;
 }
 
 bool BBBDriver::SaveDisparityPGM(const ImageList& set, const std::string& filePath)
 {
     ImagePtr disp = set.GetByPayloadType(SPINNAKER_IMAGE_PAYLOAD_TYPE_DISPARITY_SENSOR1);
-    if (!disp || disp->IsIncomplete()) return false;
-    disp->Save(filePath.c_str());
-    return true;
+    if (!disp) return false;
+    if (disp->IsIncomplete()) return false;
+    if (!disp->GetData()) return false;
+
+    try
+    {
+        std::cout << "Disparity info: "
+            << disp->GetWidth() << "x" << disp->GetHeight()
+            << " stride=" << disp->GetStride()
+            << " bpp=" << disp->GetBitsPerPixel()
+            << " fmtEnum=" << (int)disp->GetPixelFormat()
+
+            << "\n";
+
+        const unsigned int bpp = disp->GetBitsPerPixel();
+
+        if (bpp <= 8)
+            return SavePGM8(disp, filePath);
+
+        return SavePGM16_BE(disp, filePath);
+    }
+    catch (Spinnaker::Exception& e)
+    {
+        std::cout << "Excepcion guardando disparity: " << e.what() << "\n";
+        return false;
+    }
+    catch (...)
+    {
+        std::cout << "Error desconocido guardando disparity\n";
+        return false;
+    }
 }
 
 bool BBBDriver::SaveRectifiedPNG(const ImageList& set, const std::string& filePath)
 {
     ImagePtr rect = set.GetByPayloadType(SPINNAKER_IMAGE_PAYLOAD_TYPE_RECTIFIED_SENSOR1);
     if (!rect || rect->IsIncomplete()) return false;
-    rect->Save(filePath.c_str());
-    return true;
+
+    try
+    {
+        rect->Save(filePath.c_str());
+        return true;
+    }
+    catch (Spinnaker::Exception& e)
+    {
+        std::cout << "Excepcion guardando rectified: " << e.what() << "\n";
+        return false;
+    }
 }
 
 bool BBBDriver::SavePointCloudPLY(const ImageList& set, const Scan3DParams& s3d,
@@ -252,7 +369,7 @@ bool BBBDriver::SavePointCloudPLY(const ImageList& set, const Scan3DParams& s3d,
     if (disp->IsIncomplete() || rect->IsIncomplete()) return false;
 
     PointCloudParameters pc;
-    pc.decimationFactor = std::max(1, p.decimationFactor);
+    pc.decimationFactor = (std::max)(1, p.decimationFactor);
     pc.ROIImageLeft = 0;
     pc.ROIImageTop = 0;
     pc.ROIImageRight = disp->GetWidth();
@@ -268,9 +385,17 @@ bool BBBDriver::SavePointCloudPLY(const ImageList& set, const Scan3DParams& s3d,
     sc.invalidDataFlag = s3d.invalidFlag;
     sc.invalidDataValue = s3d.invalidValue;
 
-    PointCloud cloud = ImageUtilityStereo::ComputePointCloud(disp, rect, pc, sc);
-    cloud.SavePointCloudAsPly(filePath.c_str());
-    return true;
+    try
+    {
+        PointCloud cloud = ImageUtilityStereo::ComputePointCloud(disp, rect, pc, sc);
+        cloud.SavePointCloudAsPly(filePath.c_str());
+        return true;
+    }
+    catch (Spinnaker::Exception& e)
+    {
+        std::cout << "Excepcion generando PLY: " << e.what() << "\n";
+        return false;
+    }
 }
 
 bool BBBDriver::GetDistanceCentralPointM(const ImageList& set, const Scan3DParams& s3d, float& outMeters)
@@ -278,19 +403,21 @@ bool BBBDriver::GetDistanceCentralPointM(const ImageList& set, const Scan3DParam
     ImagePtr disp = set.GetByPayloadType(SPINNAKER_IMAGE_PAYLOAD_TYPE_DISPARITY_SENSOR1);
     if (!disp || disp->IsIncomplete()) return false;
 
-    int w = (int)disp->GetWidth();
-    int h = (int)disp->GetHeight();
-    int cx = w / 2;
-    int cy = h / 2;
+    const int w = (int)disp->GetWidth();
+    const int h = (int)disp->GetHeight();
+    const int cx = w / 2;
+    const int cy = h / 2;
 
     const uint16_t* data = (const uint16_t*)disp->GetData();
-    int strideU16 = (int)(disp->GetStride() / sizeof(uint16_t));
-    uint16_t raw = data[cy * strideU16 + cx];
+    if (!data) return false;
 
-    float d = (float)raw * s3d.scale + s3d.offset;
-    if (d <= 1e-3f) return false;
+    const int strideU16 = (int)(disp->GetStride() / sizeof(uint16_t));
+    const uint16_t raw = data[cy * strideU16 + cx];
 
-    float z = (s3d.focal * s3d.baseline) / d;
+    const float d = (float)raw * s3d.scale + s3d.offset;
+    if (d <= 1e-6f) return false;
+
+    const float z = (s3d.focal * s3d.baseline) / d;
     if (!std::isfinite(z)) return false;
 
     outMeters = z;
@@ -303,30 +430,32 @@ bool BBBDriver::GetDistanceToBultoM(const ImageList& set, const Scan3DParams& s3
     ImagePtr disp = set.GetByPayloadType(SPINNAKER_IMAGE_PAYLOAD_TYPE_DISPARITY_SENSOR1);
     if (!disp || disp->IsIncomplete()) return false;
 
-    int w = (int)disp->GetWidth();
-    int h = (int)disp->GetHeight();
+    const int w = (int)disp->GetWidth();
+    const int h = (int)disp->GetHeight();
 
-    int x0 = w * p.roiMinPct / 100;
-    int x1 = w * p.roiMaxPct / 100;
-    int y0 = h * p.roiMinPct / 100;
-    int y1 = h * p.roiMaxPct / 100;
+    const int x0 = w * p.roiMinPct / 100;
+    const int x1 = w * p.roiMaxPct / 100;
+    const int y0 = h * p.roiMinPct / 100;
+    const int y1 = h * p.roiMaxPct / 100;
 
     const uint16_t* data = (const uint16_t*)disp->GetData();
-    int strideU16 = (int)(disp->GetStride() / sizeof(uint16_t));
+    if (!data) return false;
+
+    const int strideU16 = (int)(disp->GetStride() / sizeof(uint16_t));
 
     std::vector<float> depths;
     depths.reserve((x1 - x0) * (y1 - y0));
 
-    for (int y = y0; y < y1; y++)
+    for (int y = y0; y < y1; ++y)
     {
         const uint16_t* row = data + y * strideU16;
-        for (int x = x0; x < x1; x++)
+        for (int x = x0; x < x1; ++x)
         {
-            uint16_t raw = row[x];
-            float d = (float)raw * s3d.scale + s3d.offset;
-            if (d <= 1e-3f) continue;
+            const uint16_t raw = row[x];
+            const float d = (float)raw * s3d.scale + s3d.offset;
+            if (d <= 1e-6f) continue;
 
-            float z = (s3d.focal * s3d.baseline) / d;
+            const float z = (s3d.focal * s3d.baseline) / d;
             if (!std::isfinite(z)) continue;
 
             if (z >= p.minRangeM && z <= p.maxRangeM)
@@ -339,6 +468,56 @@ bool BBBDriver::GetDistanceToBultoM(const ImageList& set, const Scan3DParams& s3
     outMeters = Percentile(depths, 0.10f);
     return std::isfinite(outMeters);
 }
+bool BBBDriver::GetDistanceToBultoM_Debug(const ImageList& set, const Scan3DParams& s3d,
+    const BBBParams& p, float& outMeters, int& outUsedPoints)
+{
+    outUsedPoints = 0;
+
+    ImagePtr disp = set.GetByPayloadType(SPINNAKER_IMAGE_PAYLOAD_TYPE_DISPARITY_SENSOR1);
+    if (!disp || disp->IsIncomplete()) return false;
+
+    const int w = (int)disp->GetWidth();
+    const int h = (int)disp->GetHeight();
+
+    const int x0 = w * p.roiMinPct / 100;
+    const int x1 = w * p.roiMaxPct / 100;
+    const int y0 = h * p.roiMinPct / 100;
+    const int y1 = h * p.roiMaxPct / 100;
+
+    const uint16_t* data = (const uint16_t*)disp->GetData();
+    if (!data) return false;
+
+    const int strideU16 = (int)(disp->GetStride() / sizeof(uint16_t));
+
+    std::vector<float> depths;
+    depths.reserve((x1 - x0) * (y1 - y0));
+
+    for (int y = y0; y < y1; ++y)
+    {
+        const uint16_t* row = data + y * strideU16;
+        for (int x = x0; x < x1; ++x)
+        {
+            const uint16_t raw = row[x];
+            const float d = (float)raw * s3d.scale + s3d.offset;
+            if (d <= 1e-6f) continue;
+
+            const float z = (s3d.focal * s3d.baseline) / d;
+            if (!std::isfinite(z)) continue;
+
+            if (z >= p.minRangeM && z <= p.maxRangeM)
+            {
+                depths.push_back(z);
+                outUsedPoints++;
+            }
+        }
+    }
+
+    if (depths.size() < 100) return false;
+
+    outMeters = Percentile(depths, 0.10f);
+    return std::isfinite(outMeters);
+}
+
 
 bool BBBDriver::SetExposureUs(double exposureUs)
 {

@@ -1,7 +1,10 @@
 #pragma once
+
 #include "Spinnaker.h"
 #include "SpinGenApi/SpinnakerGenApi.h"
 #include <string>
+
+
 
 struct BBBParams
 {
@@ -11,11 +14,7 @@ struct BBBParams
     int roiMinPct = 35;
     int roiMaxPct = 65;
 
-    bool enableSpeckleFilter = false; // lo activaremos cuando validemos con cámara real
-    int maxSpeckleSize = 200;
-    int speckleThreshold = 4;
-
-    int decimationFactor = 2; // 1/2/4
+    int decimationFactor = 2;
 };
 
 struct Scan3DParams
@@ -33,6 +32,11 @@ struct Scan3DParams
 class BBBDriver
 {
 public:
+
+    bool StartAcquisition();
+    void StopAcquisition();
+    bool IsAcquiring() const { return acquiring; }
+
     BBBDriver();
     ~BBBDriver();
 
@@ -58,12 +62,18 @@ public:
     bool GetDistanceToBultoM(const Spinnaker::ImageList& set, const Scan3DParams& s3d,
         const BBBParams& p, float& outMeters);
 
+    bool GetDistanceToBultoM_Debug(const Spinnaker::ImageList& set, const Scan3DParams& s3d,
+        const BBBParams& p, float& outMeters, int& outUsedPoints);
+
+
     bool SetExposureUs(double exposureUs);
     bool SetGainDb(double gainDb);
 
     Spinnaker::CameraPtr GetCamera() const;
 
 private:
+    bool acquiring = false;
+
     static bool SetEnumAsString(Spinnaker::GenApi::INodeMap& nodeMap, const char* name, const char* value);
     static bool GetFloatNode(Spinnaker::GenApi::INodeMap& nodeMap, const char* name, float& out);
     static bool GetBoolNode(Spinnaker::GenApi::INodeMap& nodeMap, const char* name, bool& out);
