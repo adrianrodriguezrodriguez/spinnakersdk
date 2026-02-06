@@ -1,258 +1,210 @@
-#include "BBBDriver.h"
+#pragma once
 
-#include <chrono>
-#include <iomanip>
-#include <sstream>
-#include <iostream>
-#include <ctime>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 
-static std::string NowTag()
-{
-    using namespace std::chrono;
-    auto now = system_clock::now();
-    auto t = system_clock::to_time_t(now);
-
-    std::tm tm{};
 #ifdef _WIN32
-    localtime_s(&tm, &t);
-#else
-    tm = *std::localtime(&t);
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
 #endif
 
-    std::ostringstream oss;
-    oss << std::put_time(&tm, "%Y%m%d_%H%M%S");
-    return oss.str();
-}
+#include <string>
+#include <cstdint>
 
-static int AskInt(const std::string& msg, int defVal)
+#include "Spinnaker.h"
+#include "SpinGenApi/SpinnakerGenApi.h"
+
+// Parametros que usamos para filtrar y medir el bulto
+struct BBBParams
 {
-    std::cout << msg << " [" << defVal << "]: ";
-    std::string s; std::getline(std::cin, s);
-    if (s.empty()) return defVal;
-    return std::stoi(s);
-}
+    // Rango de Z en metros que aceptamos para nube y medicion
+    float minRangeM = 1.0f;
+    float maxRangeM = 5.5f;
 
-static int AskInt(const std::string& msg)
+    // ROI en porcentaje en X para recortar bordes con ruido
+    int roiMinXPct = 30;
+    int roiMaxXPct = 70;
+
+    // ROI en porcentaje en Y para recortar arriba y abajo
+    int roiMinYPct = 10;
+    int roiMaxYPct = 85;
+
+    // Decimacion en pixeles para acelerar
+    int decimationFactor = 1;
+
+    // Filtro speckle del SDK para quitar puntos sueltos en disparity
+    bool applySpeckleFilter = true;
+    int maxSpeckleSize = 900;
+    int speckleThreshold = 20;
+
+    // Mediana 3x3 en disparity para reducir ruido local
+    bool applyMedian3x3 = true;
+
+    // Voxel grid en metros para bajar densidad
+    float voxelLeafM = 0.01f;
+
+    // Outlier removal por radio en metros y minimo de vecinos
+    float outlierRadiusM = 0.08f;
+    int outlierMinNeighbors = 10;
+
+    // Nos quedamos con el cluster mas grande
+    bool keepLargestCluster = true;
+
+    // Guardado PLY binario o ascii
+    bool plyBinary = true;
+
+    // 0 gris fijo 1 rectifiedGray 2 heatmapZ
+    int colorMode = 2;
+
+    // Corte de fondo desde la cara frontal para quitar puntos lejanos
+    bool enableFrontDepthClamp = true;
+    float frontFacePercentile = 0.05f;
+    float frontDepthBandM = 1.80f;
+
+    // Grosor en Z para medir cara frontal
+    float faceSlabM = 0.20f;
+
+    // Percentiles para medir ancho y alto sin outliers
+    float dimPercentileLow = 0.02f;
+    float dimPercentileHigh = 0.98f;
+
+    // Filtro de suelo por plano detectado con RANSAC
+    bool enableGroundPlaneFilter = true;
+
+    // Banda inferior que usamos para buscar suelo por porcentaje de rango de Y
+    // 0.20 significa que buscamos candidatos en el 20% mas bajo de los puntos
+    float groundBandPct = 0.35f;
+
+    // Umbral en metros para considerar inlier del plano
+    float groundRansacThrM = 0.012f;
+
+    // Iteraciones de RANSAC
+    int groundRansacIters = 300;
+
+    // Margen por encima del plano para cortar suelo
+    float groundCutMarginM = 0.08f;
+
+    // Pitch de camara en grados para ayudar al prior
+    float cameraPitchDeg = 36.45f;
+};
+
+// Parametros Scan3D que leemos del nodemap
+struct Scan3DParams
 {
-    return AskInt(msg, 0);
-}
+    float scale = 1.0f;
+    float offset = 0.0f;
+    float focal = 0.0f;
+    float baseline = 0.0f;
+    float principalU = 0.0f;
+    float principalV = 0.0f;
+    bool invalidFlag = false;
+    float invalidValue = 0.0f;
+};
 
-
-static float AskFloat(const std::string& msg, float defVal)
+class BBBDriver
 {
-    std::cout << msg << " [" << defVal << "]: ";
-    std::string s; std::getline(std::cin, s);
-    if (s.empty()) return defVal;
-    return std::stof(s);
-}
+public:
+    BBBDriver();
+    ~BBBDriver();
 
-static double AskDouble(const std::string& msg, double defVal)
-{
-    std::cout << msg << " [" << defVal << "]: ";
-    std::string s; std::getline(std::cin, s);
-    if (s.empty()) return defVal;
-    return std::stod(s);
-}
+    // Abrimos la primera camara estereo que encontremos
+    bool OpenFirstStereo();
 
-static void ReleaseImageList(Spinnaker::ImageList& set)
-{
-    const unsigned int n = (unsigned int)set.GetSize();
-    for (unsigned int i = 0; i < n; i++)
-    {
-        Spinnaker::ImagePtr img = set.GetByIndex(i);
-        if (img) img->Release();
-    }
-}
+    // Abrimos camara estereo por serial
+    bool OpenBySerial(const std::string& serial);
 
-static const char* ColorModeName(int m)
-{
-    if (m == 2) return "heatmapZ";
-    if (m == 1) return "rectifiedGray";
-    return "gray";
-}
+    // Cerramos camara y paramos adquisicion
+    void Close();
 
-static void PrintParams(const BBBParams& p)
-{
-    std::cout << "\nParametros\n";
-    std::cout << " - Rango " << p.minRangeM << " a " << p.maxRangeM << " m\n";
-    std::cout << " - ROI " << p.roiMinPct << " a " << p.roiMaxPct << " %\n";
-    std::cout << " - Decimacion " << p.decimationFactor << "\n";
-    std::cout << " - Speckle " << (p.applySpeckleFilter ? "ON" : "OFF") << " size " << p.maxSpeckleSize
-        << " thr " << p.speckleThreshold << "\n";
-    std::cout << " - Median3x3 " << (p.applyMedian3x3 ? "ON" : "OFF") << "\n";
-    std::cout << " - Voxel " << p.voxelLeafM << " m\n";
-    std::cout << " - Outlier radius " << p.outlierRadiusM << " m  minN " << p.outlierMinNeighbors << "\n";
-    std::cout << " - Cluster " << (p.keepLargestCluster ? "ON" : "OFF") << "\n";
-    std::cout << " - ColorMode " << p.colorMode << " " << ColorModeName(p.colorMode) << "\n";
-    std::cout << " - PLY " << (p.plyBinary ? "BIN" : "ASCII") << "\n";
-}
+    // Desactivamos heartbeat para debug si hace falta
+    bool DisableGVCPHeartbeat(bool disable);
 
-int main()
-{
-    BBBDriver driver;
-    BBBParams p;
+    // Activamos streams rectified y disparity en sensor1
+    bool ConfigureStreams_Rectified1_Disparity();
 
-    std::cout << "=== BBBDriverConsole BBB Spinnaker ===\n\n";
+    // Activamos trigger por software
+    bool ConfigureSoftwareTrigger();
 
-    if (!driver.OpenFirstStereo())
-    {
-        std::cout << "ERROR no detectamos camara estereo\n";
-        return 1;
-    }
+    // Configuramos buffers a NewestOnly para no acumular frames viejos
+    bool ConfigureStreamBuffersNewestOnly();
 
-#ifdef _DEBUG
-    driver.DisableGVCPHeartbeat(true);
-#endif
+    // Leemos parametros Scan3D del firmware
+    bool ReadScan3DParams(Scan3DParams& out);
 
-    std::cout << "OK camara estereo detectada\n";
+    // Iniciamos adquisicion
+    bool StartAcquisition();
 
-    if (!driver.ConfigureStreams_Rectified1_Disparity())
-    {
-        std::cout << "ERROR no pudimos configurar rectified y disparity\n";
-        return 2;
-    }
+    // Paramos adquisicion
+    void StopAcquisition();
 
-    if (!driver.ConfigureSoftwareTrigger())
-        std::cout << "AVISO trigger software no activado pero seguimos\n";
+    // Capturamos set sincronizado con trigger software
+    bool CaptureOnceSync(Spinnaker::ImageList& outSet, uint64_t timeoutMs);
 
-    Scan3DParams s3d;
-    if (!driver.ReadScan3DParams(s3d))
-    {
-        std::cout << "ERROR leyendo Scan3D\n";
-        return 3;
-    }
+    // Guardamos disparity para debug
+    bool SaveDisparityPGM(const Spinnaker::ImageList& set, const std::string& filePath);
 
-    std::cout << "Scan3D baseline " << s3d.baseline
-        << " focal " << s3d.focal
-        << " scale " << s3d.scale
-        << " offset " << s3d.offset << "\n";
+    // Guardamos rectified para debug
+    bool SaveRectifiedPNG(const Spinnaker::ImageList& set, const std::string& filePath);
 
-    if (!driver.StartAcquisition())
-    {
-        std::cout << "ERROR no pudimos iniciar adquisicion\n";
-        return 4;
-    }
+    // Generamos nube filtrada y la guardamos en PLY
+    bool SavePointCloudPLY_Filtered(
+        const Spinnaker::ImageList& set,
+        const Scan3DParams& s3d,
+        const BBBParams& p,
+        const std::string& filePath
+    );
 
-    PrintParams(p);
+    // Medimos distancia del punto central
+    bool GetDistanceCentralPointM(const Spinnaker::ImageList& set, const Scan3DParams& s3d, float& outMeters);
 
-    while (true)
-    {
-        std::cout << "\n---------------------------------\n";
-        std::cout << "MENU\n";
-        std::cout << " 1 Guardar disparity pgm y rectified png\n";
-        std::cout << " 2 Generar nube ply limpia con colorMode\n";
-        std::cout << " 3 Medir distancia centro y cara del bulto\n";
-        std::cout << " 4 Cambiar parametros\n";
-        std::cout << " 5 Releer Scan3D\n";
-        std::cout << " 0 Salir\n";
-        std::cout << "Opcion: ";
+    // Medimos distancia a cara del bulto con percentil en ROI
+    bool GetDistanceToBultoM_Debug(
+        const Spinnaker::ImageList& set,
+        const Scan3DParams& s3d,
+        const BBBParams& p,
+        float& outMeters,
+        int& outUsedPoints
+    );
 
-        std::string opt;
-        std::getline(std::cin, opt);
+    // Seteamos exposicion en microsegundos
+    bool SetExposureUs(double exposureUs);
 
-        if (opt == "0") break;
+    // Seteamos ganancia en dB
+    bool SetGainDb(double gainDb);
 
-        if (opt == "4")
-        {
-            p.minRangeM = AskFloat("Min rango metros", p.minRangeM);
-            p.maxRangeM = AskFloat("Max rango metros", p.maxRangeM);
+    // Devolvemos puntero a camara
+    Spinnaker::CameraPtr GetCamera() const;
 
-            p.roiMinPct = AskInt("ROI min porcentaje", p.roiMinPct);
-            p.roiMaxPct = AskInt("ROI max porcentaje", p.roiMaxPct);
+private:
+    // Seteamos un enum por string
+    static bool SetEnumAsString(Spinnaker::GenApi::INodeMap& nodeMap, const char* name, const char* value);
 
-            p.decimationFactor = AskInt("Decimacion", p.decimationFactor);
+    // Probamos varios nombres por compatibilidad
+    static bool TrySetEnumAny(Spinnaker::GenApi::INodeMap& nodeMap, const char* name,
+        const char* const* values, int nValues);
 
-            p.applySpeckleFilter = (AskInt("Speckle 1 ON 0 OFF", p.applySpeckleFilter ? 1 : 0) != 0);
-            p.maxSpeckleSize = AskInt("Speckle max size", p.maxSpeckleSize);
-            p.speckleThreshold = AskInt("Speckle threshold", p.speckleThreshold);
+    // Leemos nodo float
+    static bool GetFloatNode(Spinnaker::GenApi::INodeMap& nodeMap, const char* name, float& out);
 
-            p.applyMedian3x3 = (AskInt("Median3x3 1 ON 0 OFF", p.applyMedian3x3 ? 1 : 0) != 0);
+    // Leemos nodo bool
+    static bool GetBoolNode(Spinnaker::GenApi::INodeMap& nodeMap, const char* name, bool& out);
 
-            p.voxelLeafM = AskFloat("Voxel leaf metros", p.voxelLeafM);
-            p.outlierRadiusM = AskFloat("Outlier radius metros", p.outlierRadiusM);
-            p.outlierMinNeighbors = AskInt("Outlier min vecinos", p.outlierMinNeighbors);
-            p.keepLargestCluster = (AskInt("Cluster mas grande 1 ON 0 OFF", p.keepLargestCluster ? 1 : 0) != 0);
+    // Validamos que set tiene rectified y disparity
+    static bool ValidateSetHasRectDisp(const Spinnaker::ImageList& set);
 
-            p.colorMode = AskInt("ColorMode 0 gris 1 rectified 2 heatmapZ", p.colorMode);
+    // Calculamos ROI en pixeles a partir de porcentajes
+    static void ClampRoiXY(const BBBParams& p, int w, int h, int& x0, int& x1, int& y0, int& y1);
 
-            p.plyBinary = (AskInt("PLY bin 1 BIN 0 ASCII", p.plyBinary ? 1 : 0) != 0);
+    // Convertimos baseline a metros si venia en mm
+    static float BaselineToMeters(float baselineMaybeMm);
 
-            double expUs = AskDouble("Exposure microsegundos", 5000.0);
-            double gainDb = AskDouble("Gain dB", 0.0);
-
-            driver.SetExposureUs(expUs);
-            driver.SetGainDb(gainDb);
-
-            PrintParams(p);
-            continue;
-        }
-
-        if (opt == "5")
-        {
-            if (driver.ReadScan3DParams(s3d))
-                std::cout << "OK Scan3D releido\n";
-            else
-                std::cout << "FAIL no pudimos releer Scan3D\n";
-            continue;
-        }
-
-        Spinnaker::ImageList set;
-        if (!driver.CaptureOnceSync(set, 5000))
-        {
-            std::cout << "FAIL no capturamos set\n";
-            ReleaseImageList(set);
-            continue;
-        }
-
-        const std::string tag = NowTag();
-
-        if (opt == "1")
-        {
-            std::string fDisp = "disparity_" + tag + ".pgm";
-            std::string fRect = "rectified_" + tag + ".png";
-
-            bool ok1 = driver.SaveDisparityPGM(set, fDisp);
-            bool ok2 = driver.SaveRectifiedPNG(set, fRect);
-
-            std::cout << "Guardado\n";
-            std::cout << " - " << fDisp << " " << (ok1 ? "OK" : "FAIL") << "\n";
-            std::cout << " - " << fRect << " " << (ok2 ? "OK" : "FAIL") << "\n";
-        }
-        else if (opt == "2")
-        {
-            std::string fPly = "cloud_" + tag + ".ply";
-
-            if (driver.SavePointCloudPLY_Filtered(set, s3d, p, fPly))
-                std::cout << "OK guardado " << fPly << "\n";
-            else
-                std::cout << "FAIL no pudimos generar PLY\n";
-        }
-        else if (opt == "3")
-        {
-            float zCenter = 0.f;
-            float zBulto = 0.f;
-            int used = 0;
-
-            bool okC = driver.GetDistanceCentralPointM(set, s3d, zCenter);
-            bool okB = driver.GetDistanceToBultoM_Debug(set, s3d, p, zBulto, used);
-
-            std::cout << "Distancias\n";
-            if (okC) std::cout << " - Centro " << zCenter << " m\n";
-            else std::cout << " - Centro FAIL\n";
-
-            if (okB) std::cout << " - Cara bulto " << zBulto << " m  puntos " << used << "\n";
-            else std::cout << " - Cara bulto FAIL  puntos " << used << "\n";
-        }
-        else
-        {
-            std::cout << "Opcion no valida\n";
-        }
-
-        ReleaseImageList(set);
-    }
-
-    driver.StopAcquisition();
-    driver.Close();
-    std::cout << "Saliendo\n";
-    return 0;
-}
+private:
+    bool acquiring = false;
+    Spinnaker::SystemPtr system;
+    Spinnaker::CameraPtr cam;
+};
