@@ -141,12 +141,20 @@
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="BBBConfig.cpp" />
     <ClCompile Include="BBBDriver.cpp" />
+    <ClCompile Include="BBBImageIO.cpp" />
+    <ClCompile Include="BBBPointCloudFilters.cpp" />
+    <ClCompile Include="BBBVisionMath.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="pch.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="BBBConfig.h" />
     <ClInclude Include="BBBDriver.h" />
+    <ClInclude Include="BBBImageIO.h" />
+    <ClInclude Include="BBBPointCloudFilters.h" />
+    <ClInclude Include="BBBVisionMath.h" />
     <ClInclude Include="pch.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

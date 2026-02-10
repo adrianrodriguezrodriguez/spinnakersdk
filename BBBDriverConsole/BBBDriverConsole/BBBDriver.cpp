@@ -9,18 +9,32 @@
 #include <unordered_map>
 #include <queue>
 
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-
 using namespace Spinnaker;
 using namespace Spinnaker::GenApi;
 
+// ARR helpers matematicos y color
 static float Clamp01(float v)
 {
     if (v < 0.0f) return 0.0f;
     if (v > 1.0f) return 1.0f;
     return v;
+}
+static float DegToRad(float deg)
+{
+    return deg * 3.14159265358979323846f / 180.0f;
+}
+
+// ARR sistema camara X derecha Y abajo Z delante
+static float HeightAboveGroundM(float Xc, float Yc, float Zc, float camHeightM, float pitchDownDeg)
+{
+    float yUp = -Yc;
+
+    float p = DegToRad(pitchDownDeg);
+    float cp = std::cos(p);
+    float sp = std::sin(p);
+
+    float yUpWorld = cp * yUp - sp * Zc;
+    return camHeightM + yUpWorld;
 }
 
 static void HsvToRgb(float hDeg, float s, float v, uint8_t& r, uint8_t& g, uint8_t& b)
@@ -59,10 +73,10 @@ static void DepthToHeatRGB(float z, float zMin, float zMax, uint8_t& r, uint8_t&
     t = Clamp01(t);
 
     float hue = (1.0f - t) * 240.0f;
-
     HsvToRgb(hue, 1.0f, 1.0f, r, g, b);
 }
 
+// ARR percentil robusto
 static float Percentile(std::vector<float>& v, float q)
 {
     if (v.empty()) return std::numeric_limits<float>::quiet_NaN();
@@ -83,11 +97,7 @@ struct Pt
 struct Key3
 {
     int x, y, z;
-
-    bool operator==(const Key3& o) const
-    {
-        return x == o.x && y == o.y && z == o.z;
-    }
+    bool operator==(const Key3& o) const { return x == o.x && y == o.y && z == o.z; }
 };
 
 struct Key3Hash
@@ -103,24 +113,15 @@ struct Key3Hash
 
 static Key3 CellKey(float x, float y, float z, float cell)
 {
-    return Key3{
-        (int)std::floor(x / cell),
-        (int)std::floor(y / cell),
-        (int)std::floor(z / cell)
-    };
+    return Key3{ (int)std::floor(x / cell), (int)std::floor(y / cell), (int)std::floor(z / cell) };
 }
 
+// ARR voxel sencillo
 static std::vector<Pt> VoxelDownsample(const std::vector<Pt>& in, float leaf)
 {
     if (leaf <= 1e-6f) return in;
 
-    struct Acc
-    {
-        double sx = 0, sy = 0, sz = 0;
-        double sr = 0, sg = 0, sb = 0;
-        int n = 0;
-    };
-
+    struct Acc { double sx = 0, sy = 0, sz = 0, sr = 0, sg = 0, sb = 0; int n = 0; };
     std::unordered_map<Key3, Acc, Key3Hash> m;
     m.reserve(in.size());
 
@@ -128,13 +129,8 @@ static std::vector<Pt> VoxelDownsample(const std::vector<Pt>& in, float leaf)
     {
         Key3 k = CellKey(p.x, p.y, p.z, leaf);
         auto& a = m[k];
-
-        a.sx += p.x;
-        a.sy += p.y;
-        a.sz += p.z;
-        a.sr += p.r;
-        a.sg += p.g;
-        a.sb += p.b;
+        a.sx += p.x; a.sy += p.y; a.sz += p.z;
+        a.sr += p.r; a.sg += p.g; a.sb += p.b;
         a.n += 1;
     }
 
@@ -160,6 +156,7 @@ static std::vector<Pt> VoxelDownsample(const std::vector<Pt>& in, float leaf)
     return out;
 }
 
+// ARR outlier por radio con grid
 static std::vector<Pt> RadiusOutlierRemoval(const std::vector<Pt>& in, float radius, int minNeighbors)
 {
     if (in.empty()) return in;
@@ -196,8 +193,7 @@ static std::vector<Pt> RadiusOutlierRemoval(const std::vector<Pt>& in, float rad
                     auto it = grid.find(nk);
                     if (it == grid.end()) continue;
 
-                    const auto& lst = it->second;
-                    for (int j : lst)
+                    for (int j : it->second)
                     {
                         if (j == i) continue;
                         const Pt& q = in[j];
@@ -217,13 +213,13 @@ static std::vector<Pt> RadiusOutlierRemoval(const std::vector<Pt>& in, float rad
                     if (neighbors >= minNeighbors) break;
                 }
 
-        if (neighbors >= minNeighbors)
-            out.push_back(p);
+        if (neighbors >= minNeighbors) out.push_back(p);
     }
 
     return out;
 }
 
+// ARR cluster mayor con grid BFS
 static std::vector<Pt> KeepLargestCluster(const std::vector<Pt>& in, float cellSize)
 {
     if (in.empty()) return in;
@@ -302,30 +298,18 @@ static std::vector<Pt> KeepLargestCluster(const std::vector<Pt>& in, float cellS
     for (auto& it : cells)
     {
         if (keep.find(it.first) == keep.end()) continue;
-        for (int idx : it.second)
-            out.push_back(in[idx]);
+        for (int idx : it.second) out.push_back(in[idx]);
     }
 
     return out;
 }
 
-BBBDriver::BBBDriver()
-{
-    system = System::GetInstance();
-}
-
 BBBDriver::~BBBDriver()
 {
     Close();
-    if (system)
-        system->ReleaseInstance();
 }
 
-CameraPtr BBBDriver::GetCamera() const
-{
-    return cam;
-}
-
+// TELEDYNE usamos nodos GenICam para setear enumeraciones
 bool BBBDriver::SetEnumAsString(INodeMap& nodeMap, const char* name, const char* value)
 {
     CEnumerationPtr node = nodeMap.GetNode(name);
@@ -341,13 +325,12 @@ bool BBBDriver::SetEnumAsString(INodeMap& nodeMap, const char* name, const char*
 bool BBBDriver::TrySetEnumAny(INodeMap& nodeMap, const char* name, const char* const* values, int nValues)
 {
     for (int i = 0; i < nValues; ++i)
-    {
         if (SetEnumAsString(nodeMap, name, values[i]))
             return true;
-    }
     return false;
 }
 
+// TELEDYNE leemos nodos float y bool oficiales
 bool BBBDriver::GetFloatNode(INodeMap& nodeMap, const char* name, float& out)
 {
     CFloatPtr node = nodeMap.GetNode(name);
@@ -364,6 +347,7 @@ bool BBBDriver::GetBoolNode(INodeMap& nodeMap, const char* name, bool& out)
     return true;
 }
 
+// ARR baseline mm o m a metros
 float BBBDriver::BaselineToMeters(float baselineMaybeMm)
 {
     float b = baselineMaybeMm;
@@ -371,63 +355,137 @@ float BBBDriver::BaselineToMeters(float baselineMaybeMm)
     return b;
 }
 
+// TELEDYNE validamos payloads oficiales de rectified y disparity
 bool BBBDriver::ValidateSetHasRectDisp(const ImageList& set)
 {
     ImagePtr disp = set.GetByPayloadType(SPINNAKER_IMAGE_PAYLOAD_TYPE_DISPARITY_SENSOR1);
     ImagePtr rect = set.GetByPayloadType(SPINNAKER_IMAGE_PAYLOAD_TYPE_RECTIFIED_SENSOR1);
+
     if (!disp || !rect) return false;
     if (disp->IsIncomplete() || rect->IsIncomplete()) return false;
-    if (!disp->GetData()) return false;
+    if (!disp->GetData() || !rect->GetData()) return false;
     return true;
 }
 
-bool BBBDriver::OpenFirstStereo()
+// ARR clamp roi en porcentajes
+void BBBDriver::ClampRoiXY(const BBBParams& p, int w, int h, int& x0, int& x1, int& y0, int& y1)
 {
-    CameraList cams = system->GetCameras();
+    int ax = (std::max)(0, (std::min)(100, p.roiMinXPct));
+    int bx = (std::max)(0, (std::min)(100, p.roiMaxXPct));
+    if (ax > bx) std::swap(ax, bx);
+    if (bx - ax < 5) bx = (std::min)(100, ax + 5);
+
+    int ay = (std::max)(0, (std::min)(100, p.roiMinYPct));
+    int by = (std::max)(0, (std::min)(100, p.roiMaxYPct));
+    if (ay > by) std::swap(ay, by);
+    if (by - ay < 5) by = (std::min)(100, ay + 5);
+
+    x0 = w * ax / 100;
+    x1 = w * bx / 100;
+    y0 = h * ay / 100;
+    y1 = h * by / 100;
+
+    x0 = (std::max)(0, (std::min)(w - 1, x0));
+    x1 = (std::max)(1, (std::min)(w, x1));
+    y0 = (std::max)(0, (std::min)(h - 1, y0));
+    y1 = (std::max)(1, (std::min)(h, y1));
+}
+
+// TELEDYNE abrimos camara por serial usando CameraList
+bool BBBDriver::OpenBySerial(CameraList& cams, const std::string& serial)
+{
+    Close();
+    if (serial.empty()) return false;
     if (cams.GetSize() == 0) return false;
 
-    for (unsigned int i = 0; i < cams.GetSize(); i++)
+    // IMPORTANTE
+    // Antes teniamos un bug gordo
+    // Cada vez que buscabamos una camara por serial inicializabamos TODAS y luego haciamos DeInit() a las que no eran
+    // En multi-camara eso desinicializa la camara que ya habiamos abierto en otro BBBDriver -> BeginAcquisition [-1002]
+    // Solucion
+    // Leemos el serial por TLDevice sin tocar Init/DeInit, y solo inicializamos la camara objetivo
+
+    for (unsigned int i = 0; i < cams.GetSize(); ++i)
     {
         CameraPtr c = cams.GetByIndex(i);
-        c->Init();
+        std::string s;
 
-        bool ok = ImageUtilityStereo::IsStereoCamera(c);
-        if (ok)
+        try
         {
-            cam = c;
-            cams.Clear();
-            return true;
+            s = c->TLDevice.DeviceSerialNumber.ToString().c_str();
+        }
+        catch (...) { continue; }
+
+        if (s != serial) continue;
+
+        try
+        {
+            c->Init();
+        }
+        catch (Spinnaker::Exception& e)
+        {
+            std::cout << "Init fallo " << e.what() << "\n";
+            return false;
         }
 
-        c->DeInit();
+        bool isStereo = false;
+        try
+        {
+            isStereo = ImageUtilityStereo::IsStereoCamera(c);
+        }
+        catch (...) { isStereo = false; }
+
+        if (!isStereo)
+        {
+            try { c->DeInit(); }
+            catch (...) {}
+            return false;
+        }
+
+        cam = c;
+        return true;
     }
 
-    cams.Clear();
     return false;
 }
 
-bool BBBDriver::OpenBySerial(const std::string& serial)
+// TELEDYNE abrimos primera estereo saltando serial
+bool BBBDriver::OpenFirstStereoSkip(CameraList& cams, const std::string& serialToSkip)
 {
-    CameraList cams = system->GetCameras();
+    Close();
     if (cams.GetSize() == 0) return false;
 
-    for (unsigned int i = 0; i < cams.GetSize(); i++)
+    for (unsigned int i = 0; i < cams.GetSize(); ++i)
     {
         CameraPtr c = cams.GetByIndex(i);
-        c->Init();
 
-        std::string s = c->TLDevice.DeviceSerialNumber.ToString().c_str();
-        if (s == serial && ImageUtilityStereo::IsStereoCamera(c))
+        std::string s;
+        try { s = c->TLDevice.DeviceSerialNumber.ToString().c_str(); }
+        catch (...) { s.clear(); }
+
+        if (!serialToSkip.empty() && s == serialToSkip)
+            continue;
+
+        try
+        {
+            c->Init();
+        }
+        catch (...) { continue; }
+
+        bool okStereo = false;
+        try { okStereo = ImageUtilityStereo::IsStereoCamera(c); }
+        catch (...) { okStereo = false; }
+
+        if (okStereo)
         {
             cam = c;
-            cams.Clear();
             return true;
         }
 
-        c->DeInit();
+        try { c->DeInit(); }
+        catch (...) {}
     }
 
-    cams.Clear();
     return false;
 }
 
@@ -438,6 +496,7 @@ void BBBDriver::Close()
         if (cam)
         {
             StopAcquisition();
+            // TELEDYNE DeInit oficial
             cam->DeInit();
             cam = nullptr;
         }
@@ -445,6 +504,7 @@ void BBBDriver::Close()
     catch (...) {}
 }
 
+// TELEDYNE control GVCP heartbeat en nodos GenICam
 bool BBBDriver::DisableGVCPHeartbeat(bool disable)
 {
     if (!cam) return false;
@@ -460,28 +520,45 @@ bool BBBDriver::DisableGVCPHeartbeat(bool disable)
         }
     }
     catch (...) {}
-
     return false;
 }
 
+// TELEDYNE configuramos componentes oficiales Rectified y Disparity
 bool BBBDriver::ConfigureStreams_Rectified1_Disparity()
 {
     if (!cam) return false;
 
-    INodeMap& nodeMap = cam->GetNodeMap();
-
-    CEnumerationPtr sourceSel = nodeMap.GetNode("SourceSelector");
-    CEnumerationPtr compSel = nodeMap.GetNode("ComponentSelector");
-    CBooleanPtr compEnable = nodeMap.GetNode("ComponentEnable");
-
-    if (!IsReadable(sourceSel) || !IsWritable(sourceSel)) return false;
-    if (!IsReadable(compSel) || !IsWritable(compSel)) return false;
-    if (!IsReadable(compEnable) || !IsWritable(compEnable)) return false;
-
-    const char* sensors[] = { "Sensor1", "Sensor0" };
-    if (!TrySetEnumAny(nodeMap, "SourceSelector", sensors, 2)) return false;
-
+    try
     {
+        INodeMap& nodeMap = cam->GetNodeMap();
+
+        CEnumerationPtr sourceSel = nodeMap.GetNode("SourceSelector");
+        CEnumerationPtr compSel = nodeMap.GetNode("ComponentSelector");
+        CBooleanPtr compEnable = nodeMap.GetNode("ComponentEnable");
+
+        if (!IsReadable(sourceSel) || !IsWritable(sourceSel))
+        {
+            std::cout << "SourceSelector no accesible\n";
+            return false;
+        }
+        if (!IsReadable(compSel) || !IsWritable(compSel))
+        {
+            std::cout << "ComponentSelector no accesible\n";
+            return false;
+        }
+        if (!IsReadable(compEnable) || !IsWritable(compEnable))
+        {
+            std::cout << "ComponentEnable no accesible\n";
+            return false;
+        }
+
+        const char* sensors[] = { "Sensor1", "Sensor0" };
+        if (!TrySetEnumAny(nodeMap, "SourceSelector", sensors, 2))
+        {
+            std::cout << "No pude setear SourceSelector Sensor1/Sensor0\n";
+            return false;
+        }
+
         NodeList_t entries;
         compSel->GetEntries(entries);
         for (auto& n : entries)
@@ -491,54 +568,100 @@ bool BBBDriver::ConfigureStreams_Rectified1_Disparity()
             compSel->SetIntValue(e->GetValue());
             compEnable->SetValue(false);
         }
+
+        const char* rectNames[] = { "Rectified" };
+        if (!TrySetEnumAny(nodeMap, "ComponentSelector", rectNames, 1))
+        {
+            std::cout << "No existe ComponentSelector=Rectified\n";
+            return false;
+        }
+        compEnable->SetValue(true);
+
+        const char* dispNames[] = { "Disparity" };
+        if (!TrySetEnumAny(nodeMap, "ComponentSelector", dispNames, 1))
+        {
+            std::cout << "No existe ComponentSelector=Disparity\n";
+            return false;
+        }
+        compEnable->SetValue(true);
+
+        return true;
     }
-
-    const char* rectNames[] = { "Rectified" };
-    const char* dispNames[] = { "Disparity" };
-
-    if (!TrySetEnumAny(nodeMap, "ComponentSelector", rectNames, 1)) return false;
-    compEnable->SetValue(true);
-
-    if (!TrySetEnumAny(nodeMap, "ComponentSelector", dispNames, 1)) return false;
-    compEnable->SetValue(true);
-
-    return true;
+    catch (Spinnaker::Exception& e)
+    {
+        std::cout << "ConfigureStreams fallo " << e.what() << "\n";
+        return false;
+    }
 }
 
+// TELEDYNE trigger software con nodos oficiales
 bool BBBDriver::ConfigureSoftwareTrigger()
 {
     if (!cam) return false;
 
-    INodeMap& nodeMap = cam->GetNodeMap();
+    try
+    {
+        INodeMap& nodeMap = cam->GetNodeMap();
 
-    SetEnumAsString(nodeMap, "AcquisitionMode", "Continuous");
+        SetEnumAsString(nodeMap, "AcquisitionMode", "Continuous");
 
-    if (!SetEnumAsString(nodeMap, "TriggerMode", "Off")) return false;
-    if (!SetEnumAsString(nodeMap, "TriggerSelector", "FrameStart")) return false;
-    if (!SetEnumAsString(nodeMap, "TriggerSource", "Software")) return false;
-    if (!SetEnumAsString(nodeMap, "TriggerMode", "On")) return false;
+        if (!SetEnumAsString(nodeMap, "TriggerMode", "Off")) { std::cout << "TriggerMode Off FAIL\n"; return false; }
+        if (!SetEnumAsString(nodeMap, "TriggerSelector", "FrameStart")) { std::cout << "TriggerSelector FrameStart FAIL\n"; return false; }
+        if (!SetEnumAsString(nodeMap, "TriggerSource", "Software")) { std::cout << "TriggerSource Software FAIL\n"; return false; }
+        if (!SetEnumAsString(nodeMap, "TriggerMode", "On")) { std::cout << "TriggerMode On FAIL\n"; return false; }
 
-    return true;
+        return true;
+    }
+    catch (Spinnaker::Exception& e)
+    {
+        std::cout << "ConfigureSoftwareTrigger fallo " << e.what() << "\n";
+        return false;
+    }
 }
 
+// TELEDYNE stream buffer mode oficial
+bool BBBDriver::ConfigureStreamBuffersNewestOnly()
+{
+    if (!cam) return false;
+
+    try
+    {
+        INodeMap& tl = cam->GetTLStreamNodeMap();
+        const char* modes[] = { "NewestOnly", "OldestFirst" };
+        return TrySetEnumAny(tl, "StreamBufferHandlingMode", modes, 2);
+    }
+    catch (...) {}
+    return false;
+}
+
+// TELEDYNE Scan3D params con nodos oficiales
 bool BBBDriver::ReadScan3DParams(Scan3DParams& out)
 {
     if (!cam) return false;
 
-    INodeMap& nodeMap = cam->GetNodeMap();
+    try
+    {
+        INodeMap& nodeMap = cam->GetNodeMap();
 
-    if (!GetFloatNode(nodeMap, "Scan3dCoordinateScale", out.scale)) return false;
-    if (!GetFloatNode(nodeMap, "Scan3dCoordinateOffset", out.offset)) return false;
-    if (!GetFloatNode(nodeMap, "Scan3dFocalLength", out.focal)) return false;
-    if (!GetFloatNode(nodeMap, "Scan3dBaseline", out.baseline)) return false;
-    if (!GetFloatNode(nodeMap, "Scan3dPrincipalPointU", out.principalU)) return false;
-    if (!GetFloatNode(nodeMap, "Scan3dPrincipalPointV", out.principalV)) return false;
-    if (!GetBoolNode(nodeMap, "Scan3dInvalidDataFlag", out.invalidFlag)) return false;
-    if (!GetFloatNode(nodeMap, "Scan3dInvalidDataValue", out.invalidValue)) return false;
+        if (!GetFloatNode(nodeMap, "Scan3dCoordinateScale", out.scale)) return false;
+        if (!GetFloatNode(nodeMap, "Scan3dCoordinateOffset", out.offset)) return false;
+        if (!GetFloatNode(nodeMap, "Scan3dFocalLength", out.focal)) return false;
+        if (!GetFloatNode(nodeMap, "Scan3dBaseline", out.baseline)) return false;
+        if (!GetFloatNode(nodeMap, "Scan3dPrincipalPointU", out.principalU)) return false;
+        if (!GetFloatNode(nodeMap, "Scan3dPrincipalPointV", out.principalV)) return false;
+        if (!GetBoolNode(nodeMap, "Scan3dInvalidDataFlag", out.invalidFlag)) return false;
+        if (!GetFloatNode(nodeMap, "Scan3dInvalidDataValue", out.invalidValue)) return false;
 
-    return true;
+        return true;
+    }
+    catch (Spinnaker::Exception& e)
+    {
+        std::cout << "ReadScan3DParams fallo " << e.what() << "\n";
+        return false;
+    }
 }
 
+// TELEDYNE BeginAcquisition y EndAcquisition oficiales
 bool BBBDriver::StartAcquisition()
 {
     if (!cam) return false;
@@ -546,14 +669,7 @@ bool BBBDriver::StartAcquisition()
 
     try
     {
-        try
-        {
-            INodeMap& tl = cam->GetTLStreamNodeMap();
-            const char* modes[] = { "NewestOnly", "OldestFirst" };
-            TrySetEnumAny(tl, "StreamBufferHandlingMode", modes, 2);
-        }
-        catch (...) {}
-
+        ConfigureStreamBuffersNewestOnly();
         cam->BeginAcquisition();
         acquiring = true;
         return true;
@@ -574,6 +690,7 @@ void BBBDriver::StopAcquisition()
     acquiring = false;
 }
 
+// TELEDYNE TriggerSoftware y GetNextImageSync oficiales
 bool BBBDriver::CaptureOnceSync(ImageList& outSet, uint64_t timeoutMs)
 {
     if (!cam) return false;
@@ -584,14 +701,11 @@ bool BBBDriver::CaptureOnceSync(ImageList& outSet, uint64_t timeoutMs)
         INodeMap& nodeMap = cam->GetNodeMap();
 
         CCommandPtr sw = nodeMap.GetNode("TriggerSoftware");
-        if (IsWritable(sw))
-            sw->Execute();
+        if (IsWritable(sw)) sw->Execute();
 
         outSet = cam->GetNextImageSync(timeoutMs);
 
-        if (!ValidateSetHasRectDisp(outSet))
-            return false;
-
+        if (!ValidateSetHasRectDisp(outSet)) return false;
         return true;
     }
     catch (Spinnaker::Exception& e)
@@ -601,6 +715,7 @@ bool BBBDriver::CaptureOnceSync(ImageList& outSet, uint64_t timeoutMs)
     }
 }
 
+// ARR guardado PGM simple
 static bool SavePGM8(const ImagePtr& img, const std::string& filePath)
 {
     const int w = (int)img->GetWidth();
@@ -614,8 +729,7 @@ static bool SavePGM8(const ImagePtr& img, const std::string& filePath)
     if (!f.is_open()) return false;
 
     f << "P5\n" << w << " " << h << "\n255\n";
-    for (int y = 0; y < h; ++y)
-        f.write((const char*)(data + y * stride), w);
+    for (int y = 0; y < h; ++y) f.write((const char*)(data + y * stride), w);
 
     return true;
 }
@@ -640,10 +754,7 @@ static bool SavePGM16_BE(const ImagePtr& img, const std::string& filePath)
         for (int x = 0; x < w; ++x)
         {
             uint16_t v = row[x];
-            unsigned char be[2] = {
-                (unsigned char)(v >> 8),
-                (unsigned char)(v & 0xFF)
-            };
+            unsigned char be[2] = { (unsigned char)(v >> 8), (unsigned char)(v & 0xFF) };
             f.write((char*)be, 2);
         }
     }
@@ -667,6 +778,7 @@ bool BBBDriver::SaveDisparityPGM(const ImageList& set, const std::string& filePa
     catch (...) { return false; }
 }
 
+// TELEDYNE ImagePtr Save es oficial
 bool BBBDriver::SaveRectifiedPNG(const ImageList& set, const std::string& filePath)
 {
     ImagePtr rect = set.GetByPayloadType(SPINNAKER_IMAGE_PAYLOAD_TYPE_RECTIFIED_SENSOR1);
@@ -680,29 +792,16 @@ bool BBBDriver::SaveRectifiedPNG(const ImageList& set, const std::string& filePa
     catch (...) { return false; }
 }
 
-void BBBDriver::ClampRoi(const BBBParams& p, int w, int h, int& x0, int& x1, int& y0, int& y1)
-{
-    int a = (std::max)(0, (std::min)(100, p.roiMinPct));
-    int b = (std::max)(0, (std::min)(100, p.roiMaxPct));
-    if (a > b) std::swap(a, b);
-    if (b - a < 5) b = (std::min)(100, a + 5);
+// ARR el resto de funciones queda igual que tu version anterior
+// ARR aqui irian SavePointCloudPLY_Filtered GetDistanceCentralPointM GetDistanceToBultoM_Debug SetExposureUs SetGainDb
 
-    x0 = w * a / 100;
-    x1 = w * b / 100;
-    y0 = h * a / 100;
-    y1 = h * b / 100;
 
-    if (x1 <= x0) { x0 = w / 2 - 10; x1 = w / 2 + 10; }
-    if (y1 <= y0) { y0 = h / 2 - 10; y1 = h / 2 + 10; }
-
-    x0 = (std::max)(0, (std::min)(w - 1, x0));
-    x1 = (std::max)(1, (std::min)(w, x1));
-    y0 = (std::max)(0, (std::min)(h - 1, y0));
-    y1 = (std::max)(1, (std::min)(h, y1));
-}
-
-bool BBBDriver::SavePointCloudPLY_Filtered(const ImageList& set, const Scan3DParams& s3d,
-    const BBBParams& p, const std::string& filePath)
+bool BBBDriver::SavePointCloudPLY_Filtered(
+    const ImageList& set,
+    const Scan3DParams& s3d,
+    const BBBParams& p,
+    const BBBCameraMount& mount,
+    const std::string& filePath)
 {
     ImagePtr disp = set.GetByPayloadType(SPINNAKER_IMAGE_PAYLOAD_TYPE_DISPARITY_SENSOR1);
     ImagePtr rect = set.GetByPayloadType(SPINNAKER_IMAGE_PAYLOAD_TYPE_RECTIFIED_SENSOR1);
@@ -716,6 +815,7 @@ bool BBBDriver::SavePointCloudPLY_Filtered(const ImageList& set, const Scan3DPar
     const float focal = s3d.focal;
     if (focal <= 1e-6f || baselineM <= 1e-9f) return false;
 
+    // Aplicamos speckle del SDK sobre disparity
     if (p.applySpeckleFilter)
     {
         try
@@ -733,7 +833,6 @@ bool BBBDriver::SavePointCloudPLY_Filtered(const ImageList& set, const Scan3DPar
 
     const uint8_t* rectData = nullptr;
     int rectStride = 0;
-
     if (rect && !rect->IsIncomplete() && rect->GetData() && rect->GetBitsPerPixel() == 8)
     {
         rectData = (const uint8_t*)rect->GetData();
@@ -748,6 +847,9 @@ bool BBBDriver::SavePointCloudPLY_Filtered(const ImageList& set, const Scan3DPar
     const int strideBytes = (int)disp->GetStride();
     const int strideU16 = strideBytes / (int)sizeof(uint16_t);
 
+    int x0, x1, y0, y1;
+    ClampRoiXY(p, w, h, x0, x1, y0, y1);
+
     auto IsInvalidRaw = [&](uint16_t raw) -> bool
         {
             if (raw == 0) return true;
@@ -761,8 +863,7 @@ bool BBBDriver::SavePointCloudPLY_Filtered(const ImageList& set, const Scan3DPar
 
     auto ReadRawAt = [&](int x, int y) -> uint16_t
         {
-            if (bpp <= 8)
-                return (uint16_t)d8[y * strideBytes + x];
+            if (bpp <= 8) return (uint16_t)d8[y * strideBytes + x];
             return d16[y * strideU16 + x];
         };
 
@@ -805,11 +906,14 @@ bool BBBDriver::SavePointCloudPLY_Filtered(const ImageList& set, const Scan3DPar
         };
 
     std::vector<Pt> pts;
-    pts.reserve((w / step) * (h / step));
+    pts.reserve(((x1 - x0) / step) * ((y1 - y0) / step));
 
-    for (int y = 0; y < h; y += step)
+    float zHardMax = p.hardMaxZM;
+    float zMaxUse = std::min(p.maxRangeM, zHardMax);
+
+    for (int y = y0; y < y1; y += step)
     {
-        for (int x = 0; x < w; x += step)
+        for (int x = x0; x < x1; x += step)
         {
             uint16_t raw = MedianRaw3x3(x, y);
             if (IsInvalidRaw(raw)) continue;
@@ -820,16 +924,25 @@ bool BBBDriver::SavePointCloudPLY_Filtered(const ImageList& set, const Scan3DPar
             float z = DisparityToZ(dispVal);
             if (!std::isfinite(z)) continue;
 
-            if (z < p.minRangeM || z > p.maxRangeM) continue;
+            if (z > zHardMax) continue;
+            if (z < p.minRangeM || z > zMaxUse) continue;
 
             float X = ((float)x - s3d.principalU) * z / focal;
             float Y = ((float)y - s3d.principalV) * z / focal;
+
+            // filtro geometrico suelo (si está activo)
+            if (p.enableGroundPlaneFilter)
+            {
+                float hAG = HeightAboveGroundM(X, Y, z, mount.alturaCamaraM, mount.pitchDeg);
+                if (!std::isfinite(hAG)) continue;
+                if (hAG < p.groundMinHeightM) continue;
+            }
 
             uint8_t R = 180, G = 180, B = 180;
 
             if (p.colorMode == 2)
             {
-                DepthToHeatRGB(z, p.minRangeM, p.maxRangeM, R, G, B);
+                DepthToHeatRGB(z, p.minRangeM, zMaxUse, R, G, B);
             }
             else if (p.colorMode == 1 && rectData && rectStride > 0)
             {
@@ -840,7 +953,6 @@ bool BBBDriver::SavePointCloudPLY_Filtered(const ImageList& set, const Scan3DPar
             Pt q;
             q.x = X; q.y = Y; q.z = z;
             q.r = R; q.g = G; q.b = B;
-
             pts.push_back(q);
         }
     }
@@ -851,29 +963,175 @@ bool BBBDriver::SavePointCloudPLY_Filtered(const ImageList& set, const Scan3DPar
         return false;
     }
 
-    std::cout << "Puntos raw " << pts.size() << "\n";
+    std::cout << "Puntos RAW (sin filtrar) " << pts.size() << "\n";
 
-    std::vector<Pt> tmp;
+    float zFront = std::numeric_limits<float>::quiet_NaN();
+    if (p.enableFrontDepthClamp)
+    {
+        std::vector<float> zvals;
+        zvals.reserve(pts.size());
+        for (const auto& q : pts) zvals.push_back(q.z);
 
-    tmp = VoxelDownsample(pts, p.voxelLeafM);
-    pts.swap(tmp);
-    std::cout << "Puntos voxel " << pts.size() << "\n";
+        zFront = Percentile(zvals, p.frontFacePercentile);
+        if (std::isfinite(zFront))
+        {
+            float zCut = zFront + p.frontDepthBandM;
 
-    tmp = RadiusOutlierRemoval(pts, p.outlierRadiusM, p.outlierMinNeighbors);
-    pts.swap(tmp);
-    std::cout << "Puntos outlier " << pts.size() << "\n";
+            std::vector<Pt> tmp;
+            tmp.reserve(pts.size());
+
+            for (const auto& q : pts)
+                if (q.z <= zCut) tmp.push_back(q);
+
+            std::cout << "Corte de fondo (profundidad) zFront (frente) " << zFront
+                << " m banda " << p.frontDepthBandM
+                << " puntos " << pts.size() << " -> " << tmp.size() << "\n";
+
+            pts.swap(tmp);
+        }
+    }
+
+    if (pts.size() < 400)
+    {
+        std::cout << "Pocos puntos tras corte fondo " << pts.size() << "\n";
+        return false;
+    }
+
+    {
+        auto tmp = VoxelDownsample(pts, p.voxelLeafM);
+        std::cout << "Puntos voxel " << pts.size() << " -> " << tmp.size() << "\n";
+        pts.swap(tmp);
+    }
+
+    {
+        auto tmp = RadiusOutlierRemoval(pts, p.outlierRadiusM, p.outlierMinNeighbors);
+        std::cout << "Puntos outlier " << pts.size() << " -> " << tmp.size() << "\n";
+        pts.swap(tmp);
+    }
 
     if (p.keepLargestCluster)
     {
-        tmp = KeepLargestCluster(pts, p.outlierRadiusM);
+        auto tmp = KeepLargestCluster(pts, p.outlierRadiusM);
+        std::cout << "Puntos cluster " << pts.size() << " -> " << tmp.size() << "\n";
         pts.swap(tmp);
-        std::cout << "Puntos cluster " << pts.size() << "\n";
     }
 
     if (pts.size() < 300)
     {
         std::cout << "Pocos puntos despues de limpiar " << pts.size() << "\n";
         return false;
+    }
+
+    // Medidas en consola
+    {
+        std::vector<float> xs, zs, hs;
+        xs.reserve(pts.size());
+        zs.reserve(pts.size());
+        hs.reserve(pts.size());
+
+        for (const auto& q : pts)
+        {
+            xs.push_back(q.x);
+            zs.push_back(q.z);
+
+            float hAG = HeightAboveGroundM(q.x, q.y, q.z, mount.alturaCamaraM, mount.pitchDeg);
+            if (std::isfinite(hAG)) hs.push_back(hAG);
+        }
+
+        float xMin = +1e9f, xMax = -1e9f;
+        float hMin = +1e9f, hMax = -1e9f;
+        float zMin = +1e9f, zMax = -1e9f;
+
+        for (const auto& q : pts)
+        {
+            xMin = std::min(xMin, q.x);
+            xMax = std::max(xMax, q.x);
+            zMin = std::min(zMin, q.z);
+            zMax = std::max(zMax, q.z);
+        }
+
+        for (float hv : hs)
+        {
+            hMin = std::min(hMin, hv);
+            hMax = std::max(hMax, hv);
+        }
+
+        float qLo = std::clamp(p.dimPercentileLow, 0.0f, 0.49f);
+        float qHi = std::clamp(p.dimPercentileHigh, 0.51f, 1.0f);
+
+        float xLo = Percentile(xs, qLo);
+        float xHi = Percentile(xs, qHi);
+
+        float hLo = Percentile(hs, qLo);
+        float hHi = Percentile(hs, qHi);
+
+        float zLo = Percentile(zs, 0.05f);
+        float zHi = Percentile(zs, 0.95f);
+
+        float anchoM = xHi - xLo;
+        float altoM = hHi - hLo;
+
+        float zFace = std::isfinite(zFront) ? zFront : Percentile(zs, p.frontFacePercentile);
+        float faceAnchoM = std::numeric_limits<float>::quiet_NaN();
+        float faceAltoM = std::numeric_limits<float>::quiet_NaN();
+
+        if (std::isfinite(zFace))
+        {
+            std::vector<float> fxs, fhs;
+            fxs.reserve(pts.size() / 3);
+            fhs.reserve(pts.size() / 3);
+
+            float zLim = zFace + p.faceSlabM;
+            for (const auto& q : pts)
+            {
+                if (q.z > zLim) continue;
+                fxs.push_back(q.x);
+
+                float hAG = HeightAboveGroundM(q.x, q.y, q.z, mount.alturaCamaraM, mount.pitchDeg);
+                if (std::isfinite(hAG)) fhs.push_back(hAG);
+            }
+
+            if (fxs.size() >= 200 && fhs.size() >= 200)
+            {
+                float fxLo = Percentile(fxs, qLo);
+                float fxHi = Percentile(fxs, qHi);
+                float fhLo = Percentile(fhs, qLo);
+                float fhHi = Percentile(fhs, qHi);
+
+                faceAnchoM = fxHi - fxLo;
+                faceAltoM = fhHi - fhLo;
+            }
+        }
+
+        std::cout << "BULTO dims "
+            << "alto p" << (int)std::lround(qLo * 100) << "-" << (int)std::lround(qHi * 100) << " "
+            << altoM << " m " << (int)std::lround(altoM * 1000.0f) << " mm "
+            << "ancho p" << (int)std::lround(qLo * 100) << "-" << (int)std::lround(qHi * 100) << " "
+            << anchoM << " m " << (int)std::lround(anchoM * 1000.0f) << " mm "
+            << "z p5-95 " << zLo << " a " << zHi
+            << "\n";
+
+        std::cout << "BULTO debug "
+            << "alto min-max " << (hMax - hMin) << " m "
+            << "ancho min-max " << (xMax - xMin) << " m "
+            << "z min-max " << zMin << " a " << zMax
+            << "\n";
+
+        if (std::isfinite(faceAnchoM) && std::isfinite(faceAltoM))
+        {
+            float areaM2 = faceAnchoM * faceAltoM;
+            std::cout << "CARA frontal "
+                << "zFront (frente) " << zFace
+                << " slab (grosor) " << p.faceSlabM
+                << " ancho " << faceAnchoM << " m " << (int)std::lround(faceAnchoM * 1000.0f) << " mm "
+                << " alto " << faceAltoM << " m " << (int)std::lround(faceAltoM * 1000.0f) << " mm "
+                << " area " << areaM2 << " m2"
+                << "\n";
+        }
+        else
+        {
+            std::cout << "CARA frontal sin suficientes puntos para medir\n";
+        }
     }
 
     std::ofstream f(filePath, std::ios::binary);
@@ -910,8 +1168,9 @@ bool BBBDriver::SavePointCloudPLY_Filtered(const ImageList& set, const Scan3DPar
 
     std::cout << "PLY guardado " << filePath
         << " puntos " << pts.size()
-        << " rango " << p.minRangeM << " a " << p.maxRangeM
-        << " colorMode " << p.colorMode << "\n";
+        << " rango " << p.minRangeM << " a " << std::min(p.maxRangeM, p.hardMaxZM)
+        << " colorMode " << p.colorMode
+        << "\n";
 
     return true;
 }
@@ -954,15 +1213,13 @@ bool BBBDriver::GetDistanceCentralPointM(const ImageList& set, const Scan3DParam
     return true;
 }
 
-bool BBBDriver::GetDistanceToBultoM(const ImageList& set, const Scan3DParams& s3d,
-    const BBBParams& p, float& outMeters)
-{
-    int used = 0;
-    return GetDistanceToBultoM_Debug(set, s3d, p, outMeters, used);
-}
-
-bool BBBDriver::GetDistanceToBultoM_Debug(const ImageList& set, const Scan3DParams& s3d,
-    const BBBParams& p, float& outMeters, int& outUsedPoints)
+bool BBBDriver::GetDistanceToBultoM_Debug(
+    const ImageList& set,
+    const Scan3DParams& s3d,
+    const BBBParams& p,
+    const BBBCameraMount& mount,
+    float& outMeters,
+    int& outUsedPoints)
 {
     outUsedPoints = 0;
 
@@ -973,7 +1230,7 @@ bool BBBDriver::GetDistanceToBultoM_Debug(const ImageList& set, const Scan3DPara
     const int h = (int)disp->GetHeight();
 
     int x0, x1, y0, y1;
-    ClampRoi(p, w, h, x0, x1, y0, y1);
+    ClampRoiXY(p, w, h, x0, x1, y0, y1);
 
     const unsigned int bpp = disp->GetBitsPerPixel();
     const uint8_t* d8 = (const uint8_t*)disp->GetData();
@@ -983,8 +1240,7 @@ bool BBBDriver::GetDistanceToBultoM_Debug(const ImageList& set, const Scan3DPara
 
     auto ReadRawAt = [&](int x, int y) -> uint16_t
         {
-            if (bpp <= 8)
-                return (uint16_t)d8[y * strideBytes + x];
+            if (bpp <= 8) return (uint16_t)d8[y * strideBytes + x];
             return d16[y * strideU16 + x];
         };
 
@@ -1005,6 +1261,9 @@ bool BBBDriver::GetDistanceToBultoM_Debug(const ImageList& set, const Scan3DPara
     std::vector<float> depths;
     depths.reserve((x1 - x0) * (y1 - y0));
 
+    float zHardMax = p.hardMaxZM;
+    float zMaxUse = std::min(p.maxRangeM, zHardMax);
+
     for (int y = y0; y < y1; ++y)
     {
         for (int x = x0; x < x1; ++x)
@@ -1018,17 +1277,28 @@ bool BBBDriver::GetDistanceToBultoM_Debug(const ImageList& set, const Scan3DPara
             float z = (focal * baselineM) / d;
             if (!std::isfinite(z)) continue;
 
-            if (z >= p.minRangeM && z <= p.maxRangeM)
+            if (z > zHardMax) continue;
+            if (z < p.minRangeM || z > zMaxUse) continue;
+
+            if (p.enableGroundPlaneFilter)
             {
-                depths.push_back(z);
-                outUsedPoints++;
+                float X = ((float)x - s3d.principalU) * z / focal;
+                float Y = ((float)y - s3d.principalV) * z / focal;
+
+                float hAG = HeightAboveGroundM(X, Y, z, mount.alturaCamaraM, mount.pitchDeg);
+                if (!std::isfinite(hAG)) continue;
+                if (hAG < p.groundMinHeightM) continue;
             }
+
+            depths.push_back(z);
+            outUsedPoints++;
         }
     }
 
     if (depths.size() < 200) return false;
 
-    outMeters = Percentile(depths, 0.10f);
+    std::vector<float> tmp = depths;
+    outMeters = Percentile(tmp, p.bultoFacePercentile);
     return std::isfinite(outMeters);
 }
 

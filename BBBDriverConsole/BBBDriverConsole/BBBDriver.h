@@ -1,38 +1,26 @@
 #pragma once
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+#ifdef _WIN32
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
+#endif
+
 #include <string>
 #include <cstdint>
 
+// TELEDYNE usamos Spinnaker y GenApi oficiales
 #include "Spinnaker.h"
 #include "SpinGenApi/SpinnakerGenApi.h"
 
-struct BBBParams
-{
-    float minRangeM = 0.5f;
-    float maxRangeM = 6.0f;
-
-    int roiMinPct = 35;
-    int roiMaxPct = 65;
-
-    int decimationFactor = 1;
-
-    bool applySpeckleFilter = true;
-    int maxSpeckleSize = 600;
-    int speckleThreshold = 15;
-
-    bool applyMedian3x3 = true;
-
-    bool plyBinary = true;
-
-    float voxelLeafM = 0.01f;
-    float outlierRadiusM = 0.04f;
-    int outlierMinNeighbors = 4;
-
-    bool keepLargestCluster = true;
-
-    int colorMode = 2;
-};
-
+#include "BBBConfig.h"
 
 struct Scan3DParams
 {
@@ -49,17 +37,19 @@ struct Scan3DParams
 class BBBDriver
 {
 public:
-    BBBDriver();
+    BBBDriver() = default;
     ~BBBDriver();
 
-    bool OpenFirstStereo();
-    bool OpenBySerial(const std::string& serial);
+    bool OpenBySerial(Spinnaker::CameraList& cams, const std::string& serial);
+    bool OpenFirstStereoSkip(Spinnaker::CameraList& cams, const std::string& serialToSkip);
+
     void Close();
 
-    bool ConfigureStreams_Rectified1_Disparity();
-
-    bool ConfigureSoftwareTrigger();
     bool DisableGVCPHeartbeat(bool disable);
+
+    bool ConfigureStreams_Rectified1_Disparity();
+    bool ConfigureSoftwareTrigger();
+    bool ConfigureStreamBuffersNewestOnly();
 
     bool ReadScan3DParams(Scan3DParams& out);
 
@@ -75,22 +65,17 @@ public:
         const Spinnaker::ImageList& set,
         const Scan3DParams& s3d,
         const BBBParams& p,
+        const BBBCameraMount& mount,
         const std::string& filePath
     );
 
     bool GetDistanceCentralPointM(const Spinnaker::ImageList& set, const Scan3DParams& s3d, float& outMeters);
 
-    bool GetDistanceToBultoM(
-        const Spinnaker::ImageList& set,
-        const Scan3DParams& s3d,
-        const BBBParams& p,
-        float& outMeters
-    );
-
     bool GetDistanceToBultoM_Debug(
         const Spinnaker::ImageList& set,
         const Scan3DParams& s3d,
         const BBBParams& p,
+        const BBBCameraMount& mount,
         float& outMeters,
         int& outUsedPoints
     );
@@ -98,23 +83,21 @@ public:
     bool SetExposureUs(double exposureUs);
     bool SetGainDb(double gainDb);
 
-    Spinnaker::CameraPtr GetCamera() const;
+    Spinnaker::CameraPtr GetCamera() const { return cam; }
 
 private:
+    // TELEDYNE trabajamos con nodos GenICam oficiales
     static bool SetEnumAsString(Spinnaker::GenApi::INodeMap& nodeMap, const char* name, const char* value);
-    static bool TrySetEnumAny(Spinnaker::GenApi::INodeMap& nodeMap, const char* name,
-        const char* const* values, int nValues);
+    static bool TrySetEnumAny(Spinnaker::GenApi::INodeMap& nodeMap, const char* name, const char* const* values, int nValues);
 
     static bool GetFloatNode(Spinnaker::GenApi::INodeMap& nodeMap, const char* name, float& out);
     static bool GetBoolNode(Spinnaker::GenApi::INodeMap& nodeMap, const char* name, bool& out);
 
-    static void ClampRoi(const BBBParams& p, int w, int h, int& x0, int& x1, int& y0, int& y1);
-    static float BaselineToMeters(float baselineMaybeMm);
-
     static bool ValidateSetHasRectDisp(const Spinnaker::ImageList& set);
+    static void ClampRoiXY(const BBBParams& p, int w, int h, int& x0, int& x1, int& y0, int& y1);
+    static float BaselineToMeters(float baselineMaybeMm);
 
 private:
     bool acquiring = false;
-    Spinnaker::SystemPtr system;
     Spinnaker::CameraPtr cam;
 };
